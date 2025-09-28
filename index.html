@@ -92,13 +92,44 @@
       drawSearchCircle();
     }
 
-    function buildFiltersQL() {
-      const parts = [];
-      if ($('#wheelchairOnly').checked) parts.push('["wheelchair"~"^(yes|designated|limited)$"]');
-      if ($('#changingOnly').checked) parts.push('["changing_table"~"^(yes|separate)$"]');
-      if ($('#unisexOnly').checked) parts.push('["unisex"~"^(yes)$"];way["toilets:unisex"~"^(yes)$"]');
-      return parts.join('');
+    function buildOverpassQuery(lat, lng, r) {
+      // Build Overpass QL with proper unions per element type.
+      // We DO NOT splice a different element type (e.g., way) into a node filter block.
+      const wheelchair = $('#wheelchairOnly').checked;
+      const changing = $('#changingOnly').checked;
+      const unisex = $('#unisexOnly').checked;
+    
+      const extraFilters = [];
+      if (wheelchair) extraFilters.push('["wheelchair"~"^(yes|designated|limited)$"]');
+      if (changing) extraFilters.push('["changing_table"~"^(yes|separate)$"]');
+    
+      const extras = extraFilters.join('');
+    
+      function blocksFor(type) {
+        if (unisex) {
+          return [
+            `${type}(around:${r},${lat},${lng})["amenity"="toilets"]["unisex"="yes"]${extras};`,
+            `${type}(around:${r},${lat},${lng})["amenity"="toilets"]["toilets:unisex"="yes"]${extras};`
+          ];
+        }
+        return [`${type}(around:${r},${lat},${lng})["amenity"="toilets"]${extras};`];
+      }
+    
+      const parts = [
+        ...blocksFor('node'),
+        ...blocksFor('way'),
+        ...blocksFor('relation')
+      ];
+    
+      return `
+    [out:json][timeout:25];
+    (
+      ${parts.join('\n  ')}
+    );
+    out center tags;
     }
+    
+        }
 
     async function search() {
       try {
@@ -108,16 +139,18 @@
         const r = parseInt($('#radiusInput').value, 10) || 1000;
         const { lat, lng } = userMarker.getLatLng();
 
-        // Overpass QL query
-        const filtersQL = buildFiltersQL();
-        const query = `\n[out:json][timeout:25];\n(\n  node(around:${r},${lat},${lng})["amenity"="toilets"]${filtersQL};\n  way(around:${r},${lat},${lng})["amenity"="toilets"]${filtersQL};\n  relation(around:${r},${lat},${lng})["amenity"="toilets"]${filtersQL};\n);\nout center tags;`;
+        const query = buildOverpassQuery(lat, lng, r);
 
         const res = await fetch('https://overpass-api.de/api/interpreter', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
           body: new URLSearchParams({ data: query })
         });
-        if (!res.ok) throw new Error('Overpass error ' + res.status);
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error('Overpass error ' + res.status + (text ? (' — ' + text.slice(0,200)) : ''));
+        }
+
         const json = await res.json();
         const elements = json.elements || [];
         if (!elements.length) { setStatus('No bathrooms found in this radius. Try expanding your search.'); return; }
